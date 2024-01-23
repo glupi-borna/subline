@@ -1,10 +1,6 @@
-#include <cstdlib>
 #include <stdio.h>
-#include <sys/types.h>
 #include <dirent.h>
-#include <limits.h>
 #include <unistd.h>
-#include <malloc.h>
 #include <stdlib.h>
 
 
