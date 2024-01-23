@@ -130,7 +130,7 @@ bool starts(const string* str1, const string* str2) {
 bool starts(const string* str1, const char* str2) {
     for (int i=0; i<str1->len; i++) {
         auto ch = str2[i];
-        if (ch == 0) return false;
+        if (ch == 0) return true;
         if (ch != str1->text[i]) return false;
     }
     return true;
@@ -265,6 +265,7 @@ void charp_set(char* charp, const char* text, int at) {
         charp[at+idx] = text[idx];
         idx++;
     }
+    charp[at+idx] = 0;
 }
 
 optional<string> read_file(char* path) {
@@ -289,8 +290,7 @@ optional<string> git_root(string root) {
         if (dir_exists(path)) {
             return ok(slice(&root, 0, idx));
         }
-
-        idx = index_of(root, '/', nth);
+        idx = index_of(root, '/', -1-nth);
         if (idx == -1) break;
         nth--;
     }
@@ -310,7 +310,7 @@ optional<string> git_branch_name(string root) {
     if (idx == -1) { return error("Failed to find ref in .git/HEAD"); }
 
     auto res = trim(slice(&str.value, idx+1, str.value.len));
-    return ok(res);
+    return ok(copy(&res));
 }
 
 optional<string> env_var(const char* name) {
@@ -979,24 +979,24 @@ int hex_digit_to_int(const char digit) {
 int hex_to_int(const string* hex) {
     int r, g, b;
     switch (hex->len) {
-    case 7: {
+    case 4: {
         r = hex_digit_to_int(hex->text[1]);
         g = hex_digit_to_int(hex->text[2]);
         b = hex_digit_to_int(hex->text[3]);
-        r += (r<<4) + r;
-        g += (g<<4) + g;
-        b += (b<<4) + b;
+        r += (r*16);
+        g += (g*16);
+        b += (b*16);
     } break;
-    case 4: {
+    case 7: {
         int r1 = hex_digit_to_int(hex->text[1]);
         int r2 = hex_digit_to_int(hex->text[2]);
         int g1 = hex_digit_to_int(hex->text[3]);
         int g2 = hex_digit_to_int(hex->text[4]);
         int b1 = hex_digit_to_int(hex->text[5]);
         int b2 = hex_digit_to_int(hex->text[6]);
-        r = (r1<<4) + r2;
-        g = (g1<<4) + g2;
-        b = (b1<<4) + b2;
+        r = r1*16 + r2;
+        g = g1*16 + g2;
+        b = b1*16 + b2;
     } break;
     default: {
         fprintf(stderr, "Invalid color: %.*s", hex->len, hex->text);
@@ -1244,22 +1244,51 @@ string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
         strike_enable(s);
         return {0};
 
+    } else if (equal(fn_name, "in-git-repo")) {
+        NO_ARGS("in-git-repo");
+        if (s->git.error == 0) {
+            return SBLN_TRUE;
+        } else {
+            return SBLN_FALSE;
+        }
+
+    } else if (equal(fn_name, "git-branch")) {
+        NO_ARGS("git-branch");
+        if (s->git.error == 0) {
+            return s->git.value.branch;
+        } else {
+            return {0};
+        }
+
+    } else if (equal(fn_name, "git-root")) {
+        NO_ARGS("git-root");
+        if (s->git.error == 0) {
+            return s->git.value.dir;
+        } else {
+            return {0};
+        }
+
     } else if (equal(fn_name, "if")) {
         ARG_COUNT("if", 1);
         auto fn = IDENT_CALL_ARG("if", 0);
         return eval(fn);
 
+    } else if (equal(fn_name, "not")) {
+        ARG_COUNT("not", 1);
+        auto arg = IDENT_CALL_ARG("not", 0);
+        auto val = eval(arg);
+        return equal(&val, &SBLN_TRUE) ? SBLN_FALSE : SBLN_TRUE;
+
     } else if (equal(fn_name, "eq")) {
         ARG_COUNT("eq", 2);
         auto arg1 = eval(args->items[0]);
-        auto arg2 = eval(args->items[0]);
-
+        auto arg2 = eval(args->items[1]);
         return equal(&arg1, &arg2) ? SBLN_TRUE : SBLN_FALSE;
 
     } else if (starts(fn_name, "starts")) {
         ARG_COUNT("starts", 2);
         auto arg1 = eval(args->items[0]);
-        auto arg2 = eval(args->items[0]);
+        auto arg2 = eval(args->items[1]);
 
         return starts(&arg1, &arg2) ? SBLN_TRUE : SBLN_FALSE;
 
@@ -1411,8 +1440,18 @@ int main() {
     // auto venv = env_var("VIRTUAL_ENV");
     // auto last = env_var("?");
 
+
     optional<string> git_dir = git_root(copy(&state.cwd));
-    auto branch = git_dir.error ? git_dir : git_branch_name(copy(&git_dir.value));
+    state.git.error = git_dir.error;
+    if (git_dir.error == 0) {
+        state.git.value.dir = git_dir.value;
+        auto branch = git_branch_name(copy(&git_dir.value));
+        if (branch.error) {
+            state.git.value.branch = {0};
+        } else {
+            state.git.value.branch = branch.value;
+        }
+    }
 
     //     printf("Dir name: %.*s\n", (int)frag.len, frag.text);
     //     if (!git_dir.error) {
@@ -1432,24 +1471,35 @@ int main() {
 
         [bg(red) text(white) bold] {
             _
-            env("?")
-            env(USER)
+            [in-git-repo] {
+                git-branch
+                _
+                "(" env(USER) ")"
+            }
+
+            [not(in-git-repo)] { env(USER) }
             _
         }
 
-        text(red) bg(bright-black) cap("P>>")
+        text(red) bg("#123") cap("P>>")
 
-        [bg(bright-black) text(bright-white) italic] {
+        [not(in-git-repo) bg("#123") text(bright-white) bold] {
             _
-            [starts(env(PWD), env(HOME))] {
-                "~"
-            }
+            [starts(env(PWD), env(HOME))] { "~" }
             strip-prefix(env(PWD), env(HOME))
             _
         }
 
-        text(bright-black) bg(black) cap("P>>")
+        [in-git-repo bg("#123") text(bright-white) bold] {
+            _
+            [eq(env(PWD), git-root)] { "/" }
+            [not(eq(env(PWD), git-root))] { strip-prefix(env(PWD), git-root) }
+            _
+        }
+
+        text("#123") bg(black) cap("P>>")
     )END"));
+
     auto tokens = st.tokenize();
     auto sp = Subline_Parser::create(&tokens);
     bag<AST_Node*> stmts;
