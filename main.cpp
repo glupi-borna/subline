@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdio.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -7,7 +8,10 @@
 #define _CONCAT1(X,Y) X##Y
 #define CONCAT(X,Y) _CONCAT1(X,Y)
 
-#define assert(COND, MSG) if (!(COND)) { printf("ERROR: " MSG "\n"); exit(1); }
+#define log(FD, ...) fprintf(FD, __VA_ARGS__)
+#define print(...) log(stdout, __VA_ARGS__)
+#define warn(...) log(stderr, __VA_ARGS__)
+#define assert(COND, MSG) if (!(COND)) { warn(MSG "\n"); exit(1); }
 
 #define REQUIRED(NAME, OPTIONAL_EXPR) \
     auto CONCAT(_opt, __LINE__) = OPTIONAL_EXPR; \
@@ -22,9 +26,9 @@ struct optional {
     void die_on_error(const char* msg=0) {
         if (error != 0) {
             if (msg == 0) {
-                printf("ERROR: %s\n", error);
+                warn("%s\n", error);
             } else {
-                printf("ERROR: %s\n", msg);
+                warn("%s\n", msg);
             }
             exit(1);
         }
@@ -90,35 +94,88 @@ optional<T> bag_at(bag<T>* b, int index) {
     return ok(b->items[index]);
 }
 
+#define FSTR "%.*s"
+#define FARG(STR) STR.len, STR.text
+
 struct string {
     const char* text;
     int len;
 };
-
-void print(string str) {
-    printf("%.*s", str.len, str.text);
-}
-
-void print(string* str) {
-    printf("%.*s", str->len, str->text);
-}
-
-void print(const char* str) {
-    printf("%s", str);
-}
 
 template<size_t N>
 constexpr string const_string(char const(&chars)[N]) {
     return string{chars, N};
 }
 
+string stringf(const char* fmt, ...) __attribute__ ((format (printf, 1, 2)));
+string stringf(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    char* buf;
+    int len = vasprintf(&buf, fmt, args);
+    va_end(args);
+    return {buf, len};
+}
+
 const string to_string(const char* ch) {
     string out;
     out.text = ch;
     out.len = 0;
-
     if (ch == 0) { return out; }
-    while (*ch != 0) { ch++; out.len++; }
+    while (ch[out.len] != 0) { out.len++; }
+    return out;
+}
+
+const string line_at_offset(string* str, int offset) {
+    int line_start = offset;
+    int line_end = offset;
+    while (line_start >= 0 && str->text[line_start] != '\n') {
+        line_start--;
+    }
+
+    while (line_end < str->len && str->text[line_end] != '\n') {
+        line_end++;
+    }
+
+    int len = line_end - line_start;
+    return string{str->text + line_start + 1, len-1};
+}
+
+string copy(string* str) {
+    auto data = (char*)malloc(str->len);
+    for (int i=0; i<str->len; i++) {
+        data[i] = str->text[i];
+    }
+    return {.text=data, .len=str->len};
+}
+
+string to_string(int num) {
+    char buf[128];
+    snprintf(buf, 128, "%d", num);
+    auto num_str = to_string(buf);
+    return copy(&num_str);
+}
+
+string concat(string* strings, int count) {
+    string out;
+    out.len = 0;
+    for (int i=0; i<count; i++) {
+        auto str = strings[i];
+        out.len += str.len;
+    }
+
+    auto text = (char*)malloc(out.len);
+    int idx = 0;
+
+    for (int i=0; i<count; i++) {
+        auto str = strings[i];
+        for (int j=0; j<str.len; j++) {
+            text[idx] = str.text[j];
+            idx++;
+        }
+    }
+
+    out.text = text;
     return out;
 }
 
@@ -155,14 +212,6 @@ bool equal(const string* str1, const char* str2) {
         if (str1->text[i] != str2[i]) return false;
     }
     return true;
-}
-
-string copy(string* str) {
-    auto data = (char*)malloc(str->len);
-    for (int i=0; i<str->len; i++) {
-        data[i] = str->text[i];
-    }
-    return {.text=data, .len=str->len};
 }
 
 string slice(string str, int start, int end) {
@@ -229,7 +278,7 @@ int index_of(string str, char ch, int nth) {
 
 optional<string> cwd_str() {
     char cwd[PATH_MAX];
-    if (getcwd(cwd, sizeof(cwd)) == 0) { return error("Fuck you"); }
+    if (getcwd(cwd, sizeof(cwd)) == 0) { return error("Failed to get cwd"); }
     auto str = to_string(cwd);
     return ok(copy(&str));
 }
@@ -408,26 +457,20 @@ const string token_text(const Token t) {
 }
 
 const string token_line(const Token t) {
-    int line_start = t.start;
-    int line_end = t.start;
-    while (line_start >= 0 && t.source->text[line_start] != '\n') {
-        line_start--;
-    }
-
-    while (line_end < t.source->len && t.source->text[line_end] != '\n') {
-        line_end++;
-    }
-
-    int len = line_end - line_start;
-    return string{t.source->text + line_start + 1, len-1};
+    return line_at_offset(t.source, t.start);
 }
 
-char* token_str(Token t) {
-    auto type = token_type_str(t.type);
-    char* buf = (char*)malloc(80);
-    const char* charp = t.source->text + t.start;
-    snprintf(buf, 80, "%s(%.*s)", type, t.end-t.start, charp);
-    return buf;
+string to_error(Token* t) {
+    auto line = token_line(*t);
+    int offset = (t->source->text + t->start) - line.text;
+    return stringf(FSTR "\n%*c^\n", FARG(line), offset, ' ');
+}
+
+string to_string(Token* t) {
+    auto type = token_type_str(t->type);
+    auto charp = t->source->text + t->start;
+    auto len = t->end - t->start;
+    return stringf("%s(%.*s)", type, len, charp);
 }
 
 struct Subline_Tokenizer {
@@ -450,6 +493,12 @@ struct Subline_Tokenizer {
         if (target < 0 || target > this->text.len) return false;
         index = target;
         return true;
+    }
+
+    string error_str(int byte) {
+        auto line = line_at_offset(&this->text, byte);
+        int offset = (this->text.text + byte) - line.text;
+        return stringf(FSTR "\n%*c^", FARG(line), offset, ' ');
     }
 
     Token token(TOKEN type, int start) {
@@ -533,9 +582,8 @@ struct Subline_Tokenizer {
             case '=': SYM(TK_EQUALS);
             #undef SYM
             default:
-                auto msg = (char*)malloc(sizeof("Not a symbol: ") + 1);
-                sprintf(msg, "Not a symbol: %c", ch());
-                return error(msg);
+                auto msg = stringf("Not a symbol: %c", ch());
+                return error(msg.text);
         }
     }
 
@@ -556,8 +604,13 @@ struct Subline_Tokenizer {
             } else if (ch() == 0) {
                 break;
             } else {
-                REQUIRED(tok, parse_symbol());
-                bag_add(&tokens, tok);
+                auto tok = parse_symbol();
+                if (tok.error) {
+                    warn("Unexpected character: %c\n", ch());
+                    warn(FSTR"\n", FARG(error_str(index)));
+                    exit(1);
+                }
+                bag_add(&tokens, tok.value);
             }
         }
         return tokens;
@@ -615,7 +668,7 @@ struct AST_Node {
     struct type;\
     type* to_##name(AST_Node* self); \
     AST_Node* downcast(type* self); \
-    void print(type* self);
+    string to_string(type* self);
 
 AST_SPOOFER(value, AST_Value);
 AST_SPOOFER(params, AST_Params);
@@ -630,16 +683,16 @@ AST_Node* create_node(Arena* a, AT_TYPE k) {
     return n;
 }
 
-void print(AST_Node* node) {
+string to_string(AST_Node* node) {
     switch (node->kind) {
-    case AT_BLOCK: print(to_block(node)); break;
-    case AT_CALL: print(to_call(node)); break;
-    case AT_PARAMS: print(to_params(node)); break;
+    case AT_BLOCK: return to_string(to_block(node));
+    case AT_CALL: return to_string(to_call(node));
+    case AT_PARAMS: return to_string(to_params(node));
     case AT_IDENT:
     case AT_NUMBER:
-    case AT_STRING: print(to_value(node)); break;
-    case AT_IF: print(to_if(node)); break;
-    default: printf("UNKNOWN NODE TYPE"); break;
+    case AT_STRING: return to_string(to_value(node));
+    case AT_IF: return to_string(to_if(node));
+    default: return stringf("[NODE TYPE: %d]", node->kind);
     }
 }
 
@@ -655,10 +708,8 @@ AST_Value* create_value(Arena* a, AT_TYPE k, Token t) {
     return n;
 }
 
-void print(AST_Value* val) {
-    char* ch = token_str(val->token);
-    printf("%s", ch);
-    free(ch);
+string to_string(AST_Value* val) {
+    return to_string(&val->token);
 }
 
 struct AST_Param_Named {
@@ -676,11 +727,10 @@ AST_Param_Named* create_param_named(Arena* a, Token name, AST_Node* value) {
     return n;
 }
 
-void print(AST_Param_Named* val) {
+string to_string(AST_Param_Named* val) {
     string name = token_text(val->name);
-    print(&name);
-    printf("=");
-    print(val->value);
+    string valstr = to_string(val->value);
+    return stringf("%.*s=%.*s", name.len, name.text, valstr.len, valstr.text);
 }
 
 struct AST_Params {
@@ -712,12 +762,12 @@ optional<AST_Param_Named*> named_param_find(bag<AST_Node*>* params, const char* 
     return ok(to_param_named(params->items[idx]));
 }
 
-void print(AST_Params* self) {
+string to_string(AST_Params* self) {
+    string strs[self->values.len];
     for (int i=0; i<self->values.len; i++) {
-        if ((void*)self->values.items[i] == (void*)self) continue;
-        print(self->values.items[i]);
-        printf(", ");
+        strs[i] = to_string(self->values.items[i]);
     }
+    return concat(strs, self->values.len);
 }
 
 struct AST_Call {
@@ -735,12 +785,10 @@ AST_Call* create_call(Arena* a, Token ident, AST_Params* params) {
     return n;
 }
 
-void print(AST_Call* self) {
+string to_string(AST_Call* self) {
     auto name = token_text(self->ident);
-    print(&name);
-    printf("(");
-    print(self->params);
-    printf(")");
+    auto params = to_string(self->params);
+    return stringf("%.*s(%.*s)", name.len, name.text, params.len, params.text);
 }
 
 struct AST_Block {
@@ -757,18 +805,19 @@ AST_Block* create_block(Arena* a, optional<AST_Params*> params, bag<AST_Node*>* 
     return n;
 }
 
-void print(AST_Block* self) {
+string to_string(AST_Block* self) {
+    string params = {0, 0};
     if (self->params.error == 0) {
-        printf("[");
-        print(self->params.value);
-        printf("] ");
+        params = stringf("[%.*s] ", params.len, params.text);
     }
-    printf("{");
+
+    string stmts[self->statements.len];
     for (int i=0; i<self->statements.len; i++) {
-        if ((void*)self->statements.items[i] == (void*)self) continue;
-        print(self->statements.items[i]);
+        stmts[i] = to_string(self->statements.items[i]);
     }
-    printf("}\n");
+    string stmts_str = concat(stmts, self->statements.len);
+
+    return stringf("%.*s{%.*s}", params.len, params.text, stmts_str.len, stmts_str.text);
 }
 
 struct AST_If {
@@ -787,14 +836,17 @@ AST_If* create_if(Arena* a, AST_Node* condition, AST_Node* body, optional<AST_No
     return n;
 }
 
-void print(AST_If* self) {
-    printf("if ");
-    print(self->condition);
-    printf(" ");
-    print(self->body);
-    if (self->else_body.error != 0) return;
-    printf("else ");
-    print(self->else_body.value);
+string to_string(AST_If* self) {
+    auto cond = to_string(self->condition);
+    auto body = to_string(self->body);
+    auto else_body = string{0, 0};
+    if (self->else_body.error == 0) else_body = to_string(self->else_body.value);
+
+    if (self->else_body.error == 0) {
+        return stringf("if " FSTR " " FSTR " else " FSTR, FARG(cond), FARG(body), FARG(else_body));
+    } else {
+        return stringf("if " FSTR " " FSTR, FARG(cond), FARG(body));
+    }
 }
 
 #undef AST_SPOOFER
@@ -839,12 +891,8 @@ struct Subline_Parser {
     Token expect(TOKEN type, int offset=0) {
         Token tok = at(offset);
         if (tok.type != type) {
-            auto ch = token_str(tok);
-            auto line = token_line(tok);
-            print(line);
-            printf("%*c^\n", (tok.source->text+tok.start) - line.text, ' ');
-            printf("Expected %s, got %s, pos %d\n", token_type_str(type), ch, tok.start);
-            free(ch);
+            warn(FSTR, FARG(to_error(&tok)));
+            warn("Expected %s, got " FSTR ", pos %d\n", token_type_str(type), FARG(token_text(tok)), tok.start);
             exit(1);
         }
         return tok;
@@ -949,10 +997,8 @@ struct Subline_Parser {
 
         default:
             auto tok = at(0);
-            auto line = token_line(tok);
-            printf("%.*s\n", line.len, line.text);
-            printf("%*c^\n", (int)((tok.source->text+tok.start) - line.text), ' ');
-            return error("Expected an expression");
+            auto msg = stringf(FSTR "\nExpected an expression", FARG(to_error(&tok)));
+            return error(msg.text);
         }
     }
 
@@ -985,10 +1031,12 @@ struct Subline_Parser {
         if (block.error == 0) {
             return ok(downcast(block.value));
         }
+
         auto if_stmt = parse_if();
         if (if_stmt.error == 0) {
             return ok(downcast(if_stmt.value));
         }
+
         return parse_expr();
     }
 
@@ -1047,7 +1095,7 @@ struct Subline_Parser {
         auto statements = create_bag<AST_Node*>(32);
         while(at(0).type != TK_ERROR) {
             auto stmt = parse_statement();
-            if (stmt.error) { printf("ERROR: %s\n", stmt.error); exit(1); }
+            if (stmt.error) { warn("%s\n", stmt.error); exit(1); }
             bag_add(&statements, stmt.value);
         }
         return ok(statements);
@@ -1292,8 +1340,17 @@ auto SBLN_FALSE = const_string("~~FALSE~~");
 auto SBLN_TRUE = const_string("~~TRUE~~");
 
 string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
-    #define NO_ARGS(FN_NAME) assert(args == 0 || args->len == 0, FN_NAME "() expects no arguments")
-    #define ARG_COUNT(FN_NAME, NUM) assert(args->len == NUM, FN_NAME "() expects exactly " #NUM " argument(s)")
+    #define NO_ARGS(FN_NAME) \
+        assert(\
+            args == 0 || args->len == 0,\
+            FN_NAME "() expects no arguments"\
+        )
+
+    #define ARG_COUNT(FN_NAME, NUM) \
+        assert(\
+            args->len == NUM,\
+            FN_NAME "() expects exactly " #NUM " argument(s)"\
+        )
 
     #define UNQ_TOKEN(AST_NODE) unquote(token_text((AST_NODE)->token))
 
@@ -1359,7 +1416,7 @@ string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
         }
 
         text_apply(s, bg_col);
-        print(cap);
+        print(FSTR, FARG(cap));
         text_apply(s, text_col);
         bg_apply(s, bg_col);
 
@@ -1386,7 +1443,7 @@ string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
         text_apply(s, s->style.bg);
         bg_apply(s, bg_col);
 
-        print(arrow);
+        print(FSTR, FARG(arrow));
 
         text_apply(s, text_col);
         bg_apply(s, bg_col);
@@ -1506,8 +1563,8 @@ string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
         }
     }
 
-    printf("Unhandled call: %.*s\n", fn_name->len, fn_name->text);
-    return {0};
+    warn("Unhandled call: " FSTR "\n", FARG((*fn_name)));
+    exit(0);
 }
 
 void style_apply(Subline_State* s, Display_Style old_style, Display_Style new_style) {
