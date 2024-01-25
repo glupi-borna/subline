@@ -95,8 +95,16 @@ struct string {
     int len;
 };
 
+void print(string str) {
+    printf("%.*s", str.len, str.text);
+}
+
 void print(string* str) {
     printf("%.*s", str->len, str->text);
+}
+
+void print(const char* str) {
+    printf("%s", str);
 }
 
 template<size_t N>
@@ -364,6 +372,8 @@ enum TOKEN {
     TK_RANGLE,
     TK_COMMA,
     TK_EQUALS,
+    TK_KWD_IF,
+    TK_KWD_ELSE,
 };
 
 const char* token_type_str(TOKEN t) {
@@ -380,6 +390,8 @@ const char* token_type_str(TOKEN t) {
     case TK_RANGLE: return "rang";
     case TK_COMMA: return "comma";
     case TK_EQUALS: return "equals";
+    case TK_KWD_IF: return "if";
+    case TK_KWD_ELSE: return "else";
     default: return "unknown";
     }
 }
@@ -393,6 +405,21 @@ struct Token {
 
 const string token_text(const Token t) {
     return string{t.source->text+t.start, t.end-t.start};
+}
+
+const string token_line(const Token t) {
+    int line_start = t.start;
+    int line_end = t.start;
+    while (line_start >= 0 && t.source->text[line_start] != '\n') {
+        line_start--;
+    }
+
+    while (line_end < t.source->len && t.source->text[line_end] != '\n') {
+        line_end++;
+    }
+
+    int len = line_end - line_start;
+    return string{t.source->text + line_start + 1, len-1};
 }
 
 char* token_str(Token t) {
@@ -445,7 +472,21 @@ struct Subline_Tokenizer {
         while (is_ident_char(ch(), start==index)) {
             move();
         }
-        if (index == start) { return error("Not an identifier"); }
+        if (index == start) { return error("Not an identifier (0 length)"); }
+
+        switch (index-start) {
+        case 2:
+            if (text.text[start]   != 'i') break;
+            if (text.text[start+1] != 'f') break;
+            return ok(token(TK_KWD_IF, start));
+        case 4:
+            if (text.text[start]   != 'e') break;
+            if (text.text[start+1] != 'l') break;
+            if (text.text[start+2] != 's') break;
+            if (text.text[start+3] != 'e') break;
+            return ok(token(TK_KWD_ELSE, start));
+        }
+
         return ok(token(TK_IDENT, start));
     }
 
@@ -532,6 +573,7 @@ enum AT_TYPE {
     AT_CALL,
     AT_PARAM_NAMED,
     AT_BLOCK,
+    AT_IF,
 };
 
 template<typename T>
@@ -580,6 +622,7 @@ AST_SPOOFER(params, AST_Params);
 AST_SPOOFER(call, AST_Call);
 AST_SPOOFER(block, AST_Block);
 AST_SPOOFER(param_named, AST_Param_Named);
+AST_SPOOFER(if, AST_If);
 
 AST_Node* create_node(Arena* a, AT_TYPE k) {
     auto n = arena_alloc<AST_Node>(a);
@@ -595,6 +638,7 @@ void print(AST_Node* node) {
     case AT_IDENT:
     case AT_NUMBER:
     case AT_STRING: print(to_value(node)); break;
+    case AT_IF: print(to_if(node)); break;
     default: printf("UNKNOWN NODE TYPE"); break;
     }
 }
@@ -651,6 +695,23 @@ AST_Params* create_params(Arena* a, bag<AST_Node*>* values) {
     return n;
 }
 
+int named_param_idx(bag<AST_Node*>* params, const char* name) {
+    for (int i=0; i<params->len; i++) {
+        auto val = params->items[i];
+        if (val->kind != AT_PARAM_NAMED) continue;
+        auto named = to_param_named(val);
+        auto param_name = token_text(named->name);
+        if (equal(&param_name, name)) return i;
+    }
+    return -1;
+}
+
+optional<AST_Param_Named*> named_param_find(bag<AST_Node*>* params, const char* name) {
+    int idx = named_param_idx(params, name);
+    if (idx == -1) return error("Missing named parameter");
+    return ok(to_param_named(params->items[idx]));
+}
+
 void print(AST_Params* self) {
     for (int i=0; i<self->values.len; i++) {
         if ((void*)self->values.items[i] == (void*)self) continue;
@@ -684,11 +745,11 @@ void print(AST_Call* self) {
 
 struct AST_Block {
     AT_TYPE kind;
-    AST_Params* params;
+    optional<AST_Params*> params;
     bag<AST_Node*> statements;
 };
 
-AST_Block* create_block(Arena* a, AST_Params* params, bag<AST_Node*>* statements) {
+AST_Block* create_block(Arena* a, optional<AST_Params*> params, bag<AST_Node*>* statements) {
     auto n = arena_alloc<AST_Block>(a);
     n->kind = AT_BLOCK;
     n->params = params;
@@ -697,14 +758,43 @@ AST_Block* create_block(Arena* a, AST_Params* params, bag<AST_Node*>* statements
 }
 
 void print(AST_Block* self) {
-    printf("[");
-    print(self->params);
-    printf("] {");
+    if (self->params.error == 0) {
+        printf("[");
+        print(self->params.value);
+        printf("] ");
+    }
+    printf("{");
     for (int i=0; i<self->statements.len; i++) {
         if ((void*)self->statements.items[i] == (void*)self) continue;
         print(self->statements.items[i]);
     }
     printf("}\n");
+}
+
+struct AST_If {
+    AT_TYPE kind;
+    AST_Node* condition;
+    AST_Node* body;
+    optional<AST_Node*> else_body;
+};
+
+AST_If* create_if(Arena* a, AST_Node* condition, AST_Node* body, optional<AST_Node*> else_body) {
+    auto n = arena_alloc<AST_If>(a);
+    n->kind = AT_IF;
+    n->condition = condition;
+    n->body = body;
+    n->else_body = else_body;
+    return n;
+}
+
+void print(AST_If* self) {
+    printf("if ");
+    print(self->condition);
+    printf(" ");
+    print(self->body);
+    if (self->else_body.error != 0) return;
+    printf("else ");
+    print(self->else_body.value);
 }
 
 #undef AST_SPOOFER
@@ -726,6 +816,7 @@ AST_SPOOFER(params, AST_Params, AT_PARAMS);
 AST_SPOOFER(call, AST_Call, AT_CALL);
 AST_SPOOFER(block, AST_Block, AT_BLOCK);
 AST_SPOOFER(param_named, AST_Param_Named, AT_PARAM_NAMED);
+AST_SPOOFER(if, AST_If, AT_IF);
 
 struct Subline_Parser {
     bag<Token> tokens;
@@ -749,7 +840,10 @@ struct Subline_Parser {
         Token tok = at(offset);
         if (tok.type != type) {
             auto ch = token_str(tok);
-            printf("Expected %s, got %s\n", token_type_str(type), ch);
+            auto line = token_line(tok);
+            print(line);
+            printf("%*c^\n", (tok.source->text+tok.start) - line.text, ' ');
+            printf("Expected %s, got %s, pos %d\n", token_type_str(type), ch, tok.start);
             free(ch);
             exit(1);
         }
@@ -854,15 +948,46 @@ struct Subline_Parser {
         }
 
         default:
-            printf("%s: %d\n", token_type_str(at(0).type), at(0).start);
+            auto tok = at(0);
+            auto line = token_line(tok);
+            printf("%.*s\n", line.len, line.text);
+            printf("%*c^\n", (int)((tok.source->text+tok.start) - line.text), ' ');
             return error("Expected an expression");
         }
+    }
+
+    optional<AST_If*> parse_if() {
+        if (at(0).type != TK_KWD_IF) {
+            return error("Expected the 'if' keyword");
+        }
+        move();
+
+        AST_Node* condition;
+        REQUIRED(condition, parse_expr());
+
+        AST_Node* body;
+        REQUIRED(body, parse_statement());
+
+        if (at(0).type != TK_KWD_ELSE) {
+            return ok(create_if(&arena, condition, body, error("No else block")));
+        }
+
+        move();
+
+        AST_Node* else_body;
+        REQUIRED(else_body, parse_statement());
+
+        return ok(create_if(&arena, condition, body, ok(else_body)));
     }
 
     optional<AST_Node*> parse_statement() {
         auto block = parse_block();
         if (block.error == 0) {
             return ok(downcast(block.value));
+        }
+        auto if_stmt = parse_if();
+        if (if_stmt.error == 0) {
+            return ok(downcast(if_stmt.value));
         }
         return parse_expr();
     }
@@ -885,12 +1010,19 @@ struct Subline_Parser {
     }
 
     optional<AST_Block*> parse_block() {
-        if (at(0).type != TK_LANGLE) return error("Not a block");
+        optional<AST_Params*> params;
+        if (at(0).type == TK_LANGLE) {
+            params = parse_block_params();
+            params.die_on_error("Invalid block params");
+        } else {
+            params = error("No params");
+        }
 
-        AST_Params* params;
-        REQUIRED(params, parse_block_params());
-
-        expect(TK_LBRACE);
+        if (params.error == 0) {
+            expect(TK_LBRACE);
+        } else {
+            if (at(0).type != TK_LBRACE) return error("No opening brace");
+        }
         move();
 
         auto statements = create_bag<AST_Node*>(16);
@@ -928,14 +1060,15 @@ struct SGR_Tuple {
 };
 
 SGR_Tuple COLOR[] = {
-    {"black",   0},
-    {"red",     1},
-    {"green",   2},
-    {"yellow",  3},
-    {"blue",    4},
-    {"magenta", 5},
-    {"cyan",    6},
-    {"white",   7},
+    {"default", -1},
+    {"black",    0},
+    {"red",      1},
+    {"green",    2},
+    {"yellow",   3},
+    {"blue",     4},
+    {"magenta",  5},
+    {"cyan",     6},
+    {"white",    7},
     {"bright-black",   60},
     {"bright-red",     61},
     {"bright-green",   62},
@@ -1044,14 +1177,20 @@ struct Subline_State {
 #define ESCAPE "\33["
 #define SGR1(arg) printf(ESCAPE "%dm", arg)
 
+Display_Style default_style() {
+    Display_Style style;
+    style.bg = Color{CT_SGR, -1};
+    style.text = Color{CT_SGR, -1};
+    style.intensity = INT_NORMAL;
+    style.italic = false;
+    style.underline = false;
+    style.strike = false;
+    return style;
+}
+
 void reset(Subline_State* s) {
     SGR1(0);
-    s->style.bg = Color{CT_SGR, 0};
-    s->style.text = Color{CT_SGR, 0};
-    s->style.intensity = INT_NORMAL;
-    s->style.italic = false;
-    s->style.underline = false;
-    s->style.strike = false;
+    s->style = default_style();
 }
 
 #define STYLE_FN(NAME, SGR, PROP, VAL) \
@@ -1070,8 +1209,19 @@ STYLE_FN(underline_disable, 24, underline, true);
 STYLE_FN(strike_enable, 9, strike, true);
 STYLE_FN(strike_disable, 29, strike, true);
 
+void style_apply(Subline_State* s, Display_Style old_style, Display_Style new_style);
+
 void text_apply(Subline_State* s, Color col) {
     if (col.type == CT_SGR) {
+        if (col.value == -1) {
+            SGR1(0);
+            auto text_only = default_style();
+            text_only.text = col;
+            s->style.text = col;
+            style_apply(s, text_only, s->style);
+            return;
+        }
+
         SGR1(30+col.value);
     } else if (col.type == CT_HEX) {
         printf(ESCAPE "38;2;%d;%d;%dm", red(col), green(col), blue(col));
@@ -1084,8 +1234,16 @@ void text_apply(Subline_State* s, Color col) {
 
 void bg_apply(Subline_State* s, Color col) {
     if (col.type == CT_SGR) {
+        if (col.value == -1) {
+            SGR1(0);
+            auto bg_only = default_style();
+            bg_only.bg = col;
+            s->style.bg = col;
+            style_apply(s, bg_only, s->style);
+            return;
+        }
+
         SGR1(40+col.value);
-        printf(ESCAPE "%dm", 40+col.value);
     } else if (col.type == CT_HEX) {
         printf(ESCAPE "48;2;%d;%d;%dm", red(col), green(col), blue(col));
     } else {
@@ -1137,19 +1295,30 @@ string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
     #define NO_ARGS(FN_NAME) assert(args == 0 || args->len == 0, FN_NAME "() expects no arguments")
     #define ARG_COUNT(FN_NAME, NUM) assert(args->len == NUM, FN_NAME "() expects exactly " #NUM " argument(s)")
 
+    #define UNQ_TOKEN(AST_NODE) unquote(token_text((AST_NODE)->token))
+
     #define STR_ARG(FN_NAME, IDX) \
-        unquote(token_text(assert_value(\
+        UNQ_TOKEN(assert_value(\
             args->items[IDX]->kind == AT_STRING, \
             to_value(args->items[IDX]), \
             FN_NAME "() expects a string as argument " #IDX \
-        )->token))
+        ))
 
     #define IDENT_STR_ARG(FN_NAME, IDX) \
-        unquote(token_text(assert_value(\
+        UNQ_TOKEN(assert_value(\
             args->items[IDX]->kind == AT_STRING || args->items[IDX]->kind == AT_IDENT, \
             to_value(args->items[IDX]), \
             FN_NAME "() expects a string or an identifier as argument " #IDX \
-        )->token))
+        ))
+
+    #define NAMED_IDENT_STR_ARG(FN_NAME, ARG_NAME) \
+        AST_Param_Named* ARG_NAME##_raw; \
+        REQUIRED(ARG_NAME##_raw, named_param_find(args, #ARG_NAME)); \
+        auto ARG_NAME = UNQ_TOKEN(assert_value(\
+            ARG_NAME##_raw->value->kind == AT_STRING || ARG_NAME##_raw->value->kind == AT_IDENT, \
+            to_value(ARG_NAME##_raw->value), \
+            FN_NAME "() expects a string or an identifier as named argument '" #ARG_NAME "'" \
+        ))
 
     #define IDENT_CALL_ARG(FN_NAME, IDX) \
         assert_value(\
@@ -1172,15 +1341,57 @@ string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
         return {0};
 
     } else if (equal(fn_name, "cap")) {
-        ARG_COUNT("cap", 1);
-        auto value = STR_ARG("cap", 0);
+        ARG_COUNT("cap", 3);
+        auto cap_arg = IDENT_STR_ARG("cap", 0);
+        NAMED_IDENT_STR_ARG("cap", text);
+        NAMED_IDENT_STR_ARG("cap", bg);
+
+        auto text_col = string_to_color(text);
+        auto bg_col = string_to_color(bg);
+
+        string cap = cap_arg;
         for (int i=0; i<CAPS; i++) {
-            auto cap = CAP_MAP[i];
-            if (equal(&value, cap.name)) {
-                return to_string(cap.val);
+            auto candidate = CAP_MAP[i];
+            if (equal(&cap_arg, candidate.name)) {
+                cap = to_string(candidate.val);
+                break;
             }
         }
-        return value;
+
+        text_apply(s, bg_col);
+        print(cap);
+        text_apply(s, text_col);
+        bg_apply(s, bg_col);
+
+        return {0};
+
+    } else if (equal(fn_name, "arrow")) {
+        ARG_COUNT("arrow", 3);
+        auto arrow_arg = STR_ARG("arrow", 0);
+        NAMED_IDENT_STR_ARG("arrow", text);
+        NAMED_IDENT_STR_ARG("arrow", bg);
+
+        auto text_col = string_to_color(text);
+        auto bg_col = string_to_color(bg);
+
+        string arrow = arrow_arg;
+        for (int i=0; i<CAPS; i++) {
+            auto candidate = CAP_MAP[i];
+            if (equal(&arrow_arg, candidate.name)) {
+                arrow = to_string(candidate.val);
+                break;
+            }
+        }
+
+        text_apply(s, s->style.bg);
+        bg_apply(s, bg_col);
+
+        print(arrow);
+
+        text_apply(s, text_col);
+        bg_apply(s, bg_col);
+
+        return {0};
 
     } else if (equal(fn_name, "env")) {
         ARG_COUNT("env", 1);
@@ -1263,11 +1474,6 @@ string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
         } else {
             return {0};
         }
-
-    } else if (equal(fn_name, "if")) {
-        ARG_COUNT("if", 1);
-        auto fn = IDENT_CALL_ARG("if", 0);
-        return eval(fn);
 
     } else if (equal(fn_name, "not")) {
         ARG_COUNT("not", 1);
@@ -1403,13 +1609,12 @@ string eval(AST_Node* node) {
         auto block = to_block(node);
 
         auto old_style = state.style;
-        for (int i=0; i<block->params->values.len; i++) {
-            auto val = eval(block->params->values.items[i]);
-            if (i == 0 && equal(&val, &SBLN_FALSE)) {
-                return {0};
+        if (block->params.error == 0) {
+            auto params = block->params.value;
+            for (int i=0; i<params->values.len; i++) {
+                eval(params->values.items[i]);
             }
         }
-
         auto new_style = state.style;
         state.style = old_style;
         style_push(&state, new_style);
@@ -1420,6 +1625,21 @@ string eval(AST_Node* node) {
         }
 
         style_pop(&state);
+        return {0};
+    } break;
+
+    case AT_IF: {
+        auto if_stmt = to_if(node);
+        auto val = eval(if_stmt->condition);
+        if (equal(&val, &SBLN_TRUE)) {
+            auto v = eval(if_stmt->body);
+            display(v);
+            return v;
+        } else if (if_stmt->else_body.error == 0) {
+            auto v = eval(if_stmt->else_body.value);
+            display(v);
+            return v;
+        }
         return {0};
     } break;
 
@@ -1463,37 +1683,34 @@ int main() {
     //     }
 
     auto st = Subline_Tokenizer(to_string(R"END(
-        _ text(red) cap("P((")
+        _
+        cap("P((", bg=red, text=white)
 
-        [bg(red) text(white) bold] {
+        [bold] {
             _
-            [in-git-repo] {
-                git-branch
-                _
-                "(" env(USER) ")"
+            if in-git-repo {
+                git-branch _ "(" env(USER) ")"
+            } else {
+                env(USER)
             }
-
-            [not(in-git-repo)] { env(USER) }
             _
         }
 
-        text(red) bg("#123") cap("P>>")
+        arrow("P>>", bg=yellow, text=black)
 
-        [not(in-git-repo) bg("#123") text(bright-white) bold] {
+        [bold] {
             _
-            [starts(env(PWD), env(HOME))] { "~" }
-            strip-prefix(env(PWD), env(HOME))
+            if in-git-repo {
+                [eq(env(PWD), git-root)] { "/" }
+                [not(eq(env(PWD), git-root))] { strip-prefix(env(PWD), git-root) }
+            } else {
+                if starts(env(PWD), env(HOME)) "~"
+                strip-prefix(env(PWD), env(HOME))
+            }
             _
         }
 
-        [in-git-repo bg("#123") text(bright-white) bold] {
-            _
-            [eq(env(PWD), git-root)] { "/" }
-            [not(eq(env(PWD), git-root))] { strip-prefix(env(PWD), git-root) }
-            _
-        }
-
-        text("#123") bg(black) cap("P>>")
+        arrow("P>>", text=default, bg=default)
     )END"));
 
     auto tokens = st.tokenize();
