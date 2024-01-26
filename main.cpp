@@ -214,32 +214,37 @@ bool equal(const string* str1, const char* str2) {
     return true;
 }
 
-string slice(string str, int start, int end) {
-    return {
-        .text=str.text+start,
-        .len=end-start,
-    };
-}
-
-string slice(string* str, int start, int end) {
+const string slice(string* str, int start, int end) {
     return {
         .text=str->text+start,
         .len=end-start,
     };
 }
 
-string trim(string str) {
+const string trim(string* str) {
+    string out = *str;
     char ch;
-    while (ch = str.text[0], ch == ' ' || ch == '\n' || ch == '\t') {
-        str.text++;
-        str.len--;
+    while (ch = out.text[0], ch == ' ' || ch == '\n' || ch == '\t') {
+        out.text++;
+        out.len--;
     }
 
-    while (ch = str.text[str.len-1], ch == ' ' || ch == '\n' || ch == '\t') {
-        str.len--;
+    while (ch = out.text[out.len-1], ch == ' ' || ch == '\n' || ch == '\t') {
+        out.len--;
     }
 
-    return str;
+    return out;
+}
+
+const string strip_prefix(string* str, string* prefix) {
+    if (starts(str, prefix)) {
+        return string{
+            str->text + prefix->len,
+            str->len - prefix->len
+        };
+    } else {
+        return *str;
+    }
 }
 
 void fill_charp(string str, char* charp) {
@@ -362,8 +367,9 @@ optional<string> git_branch_name(string root) {
     auto idx = index_of(str.value, '/', -1);
     if (idx == -1) { return error("Failed to find ref in .git/HEAD"); }
 
-    auto res = trim(slice(&str.value, idx+1, str.value.len));
-    return ok(copy(&res));
+    auto branch = slice(&str.value, idx+1, str.value.len);
+    branch = trim(&branch);
+    return ok(copy(&branch));
 }
 
 optional<string> env_var(const char* name) {
@@ -1508,6 +1514,18 @@ string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
         strike_enable(s);
         return {0};
 
+    } else if (equal(fn_name, "dir")) {
+        NO_ARGS("dir");
+        auto home_charp = getenv("HOME");
+        if (home_charp == 0) return s->cwd;
+
+        auto home = to_string(home_charp);
+        if (starts(&s->cwd, &home)) {
+            return stringf("~" FSTR, FARG(strip_prefix(&s->cwd, &home)));
+        }
+
+        return s->cwd;
+
     } else if (equal(fn_name, "in-git-repo")) {
         NO_ARGS("in-git-repo");
         if (s->git.error == 0) {
@@ -1530,6 +1548,18 @@ string do_call(Subline_State* s, string* fn_name, bag<AST_Node*>* args) {
             return s->git.value.dir;
         } else {
             return {0};
+        }
+
+    } else if (equal(fn_name, "git-dir")) {
+        NO_ARGS("git-dir");
+        auto cwd = &s->cwd;
+        if (s->git.error != 0) return {0};
+
+        auto gitdir = &s->git.value.dir;
+        if (equal(cwd, gitdir)) {
+            return const_string("/");
+        } else {
+            return strip_prefix(cwd, gitdir);
         }
 
     } else if (equal(fn_name, "not")) {
@@ -1758,11 +1788,9 @@ int main() {
         [bold] {
             _
             if in-git-repo {
-                [eq(env(PWD), git-root)] { "/" }
-                [not(eq(env(PWD), git-root))] { strip-prefix(env(PWD), git-root) }
+                git-dir
             } else {
-                if starts(env(PWD), env(HOME)) "~"
-                strip-prefix(env(PWD), env(HOME))
+                dir
             }
             _
         }
