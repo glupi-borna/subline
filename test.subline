@@ -1,0 +1,19 @@
+" \ue0b3"
+
+if in-git-repo {
+    cap("\ue0b2", bg=yellow, text=black)
+} else {
+    cap("\ue0b2", bg=blue, text=white)
+}
+
+if in-git-repo [bg(yellow) text(black)] {
+    _ git-branch _ bold git-dir _
+} else [bg(blue) text(white)] {
+    _ bold dir _
+}
+
+bg(default)
+if in-git-repo [text(yellow)] { "\ue0b0" }
+else [text(blue)] { "\ue0b0" }
+
+"\ue0b1"

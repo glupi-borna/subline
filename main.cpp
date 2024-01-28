@@ -48,10 +48,18 @@ string read_stdin() {
     int size = 2048;
     auto offset = 0;
     auto stdin_text = (char*)malloc(size);
-    while (fgets(stdin_text+offset, 2048, stdin)) {
-        offset += 2048;
-        stdin_text = (char*)realloc(stdin_text, size+2048);
+    auto ch = 0;
+    while (true) {
+        ch = fgetc(stdin);
+        if (ch == 0 || ch == -1) break;
+        stdin_text[offset] = ch;
+        offset++;
+        if (offset == size) {
+            size *= 2;
+            stdin_text = (char*)realloc(stdin_text, size);
+        }
     }
+    stdin_text[offset] = 0;
     return to_string(stdin_text);
 }
 
@@ -386,7 +394,7 @@ bool arg_type_matches(
     return false;
 }
 
-string arg_type(
+AST_Node* arg_type_raw(
     Token* fn_name,
     bag<AST_Node*>* args,
     int idx,
@@ -399,6 +407,16 @@ string arg_type(
             FARG(to_string(fn_name)), idx+1, FARG(type_string(types))
         );
     }
+    return arg;
+}
+
+string arg_type(
+    Token* fn_name,
+    bag<AST_Node*>* args,
+    int idx,
+    std::initializer_list<AT_TYPE> types
+) {
+    auto arg = arg_type_raw(fn_name, args, idx, types);
     return unquote(token_text(&to_value(arg)->token));
 }
 
@@ -433,6 +451,7 @@ string do_call(Subline_State* s, Token* fn_name, bag<AST_Node*>* args) {
 
     #define ARG_COUNT(count) assert_arg_count(fn_name, args, count)
     #define ARG_TYPE(idx, ...) arg_type(fn_name, args, idx, {__VA_ARGS__})
+    #define ARG_TYPE_RAW(idx, ...) arg_type_raw(fn_name, args, idx, {__VA_ARGS__})
     #define ARG_NAMED(name, ...) arg_type_named(fn_name, args, name, {__VA_ARGS__})
 
     if (equal(&fn_name_str, "text")) {
@@ -450,7 +469,7 @@ string do_call(Subline_State* s, Token* fn_name, bag<AST_Node*>* args) {
 
     } else if (equal(&fn_name_str, "cap")) {
         ARG_COUNT(3);
-        auto cap_arg = ARG_TYPE(0, AT_STRING, AT_IDENT);
+        auto cap_arg = eval(ARG_TYPE_RAW(0, AT_STRING, AT_IDENT));
         auto text = ARG_NAMED("text", AT_IDENT, AT_STRING, AT_COLOR);
         auto bg = ARG_NAMED("bg", AT_IDENT, AT_STRING, AT_COLOR);
 
@@ -466,7 +485,7 @@ string do_call(Subline_State* s, Token* fn_name, bag<AST_Node*>* args) {
 
     } else if (equal(&fn_name_str, "arrow")) {
         ARG_COUNT(3);
-        auto arrow_arg = ARG_TYPE(0, AT_STRING, AT_IDENT);
+        auto arrow_arg = eval(ARG_TYPE_RAW(0, AT_STRING, AT_IDENT));
         auto text = ARG_NAMED("text", AT_IDENT, AT_STRING, AT_COLOR);
         auto bg = ARG_NAMED("bg", AT_IDENT, AT_STRING, AT_COLOR);
 
@@ -873,6 +892,7 @@ string eval(AST_Node* node) {
 }
 
 int main() {
+    state.style = default_style();
     string subline = read_stdin();
 
     REQUIRED(state.cwd, cwd_str());
