@@ -2,6 +2,7 @@
 #include "tokenizer.cpp"
 #include "ast.cpp"
 
+#include <cstdio>
 #include <initializer_list>
 #include <dirent.h>
 #include <unistd.h>
@@ -43,15 +44,32 @@ bool dir_exists(char* path) {
     return false;
 }
 
-optional<string> read_file(char* path) {
-    FILE* file = fopen(path, "r");
-    if (file == 0) return error("Failed to open file");
+string read_stdin() {
+    int size = 2048;
+    auto offset = 0;
+    auto stdin_text = (char*)malloc(size);
+    while (fgets(stdin_text+offset, 2048, stdin)) {
+        offset += 2048;
+        stdin_text = (char*)realloc(stdin_text, size+2048);
+    }
+    return to_string(stdin_text);
+}
+
+string read_file(FILE* file) {
     fseek(file, 0, SEEK_END);
     int size = ftell(file);
     fseek(file, 0, SEEK_SET);
     char* mem = (char*)malloc(size);
     auto res = fread(mem, size+1, 1, file);
-    return ok(string{mem, size});
+    return string{mem, size};
+}
+
+optional<string> read_file(const char* path) {
+    auto file = fopen(path, "r");
+    if (file == 0) return error("Failed to open file");
+    string out = read_file(file);
+    fclose(file);
+    return ok(out);
 }
 
 optional<string> git_root(string root) {
@@ -121,7 +139,7 @@ SGR_Tuple COLOR[] = {
 };
 auto COLORS = sizeof(COLOR) / sizeof(SGR_Tuple);
 
-int color_code(const string* color) {
+s32 color_code(const string* color) {
     for (int i=0; i<COLORS; i++) {
         if (equal(color, COLOR[i].name)) {
             return COLOR[i].code;
@@ -136,18 +154,19 @@ enum COLOR_TYPE {
 
 struct Color {
     COLOR_TYPE type;
-    int value;
+    s64 value;
 };
 
-int hex_digit_to_int(const char digit) {
+u8 hex_digit_to_int(const char digit) {
     if (digit >= '0' && digit <= '9') return digit - '0';
     if (digit >= 'A' && digit <= 'F') return (digit - 'A') + 10;
     if (digit >= 'a' && digit <= 'f') return (digit - 'a') + 10;
-    return -1;
+    warn("Invalid hex digit: %c\n", digit);
+    exit(1);
 }
 
-int hex_to_int(const string* hex) {
-    int r, g, b;
+u32 hex_to_int(const string* hex) {
+    u32 r, g, b;
     switch (hex->len) {
     case 4: {
         r = hex_digit_to_int(hex->text[1]);
@@ -158,12 +177,12 @@ int hex_to_int(const string* hex) {
         b += (b*16);
     } break;
     case 7: {
-        int r1 = hex_digit_to_int(hex->text[1]);
-        int r2 = hex_digit_to_int(hex->text[2]);
-        int g1 = hex_digit_to_int(hex->text[3]);
-        int g2 = hex_digit_to_int(hex->text[4]);
-        int b1 = hex_digit_to_int(hex->text[5]);
-        int b2 = hex_digit_to_int(hex->text[6]);
+        u8 r1 = hex_digit_to_int(hex->text[1]);
+        u8 r2 = hex_digit_to_int(hex->text[2]);
+        u8 g1 = hex_digit_to_int(hex->text[3]);
+        u8 g2 = hex_digit_to_int(hex->text[4]);
+        u8 b1 = hex_digit_to_int(hex->text[5]);
+        u8 b2 = hex_digit_to_int(hex->text[6]);
         r = r1*16 + r2;
         g = g1*16 + g2;
         b = b1*16 + b2;
@@ -216,7 +235,7 @@ struct Subline_State {
 };
 
 #define ESCAPE "\33["
-#define SGR1(arg) printf(ESCAPE "%dm", arg)
+#define SGR1(arg) printf(ESCAPE "%ldm", (s64)arg)
 
 Display_Style default_style() {
     Display_Style style;
@@ -293,23 +312,6 @@ void bg_apply(Subline_State* s, Color col) {
     }
     s->style.bg = col;
 }
-
-struct CAP {
-    const char* name;
-    const char* val;
-};
-
-CAP CAP_MAP[] = {
-    {"P>>", "\ue0b0"},
-    {"P>",  "\ue0b1"},
-    {"P<<", "\ue0b2"},
-    {"P<",  "\ue0b3"},
-    {"P))", "\ue0b4"},
-    {"P)",  "\ue0b5"},
-    {"P((", "\ue0b6"},
-    {"P(",  "\ue0b7"},
-};
-auto CAPS = sizeof(CAP_MAP)/sizeof(CAP);
 
 template<typename T>
 T assert_value(bool cond, T value, const char* msg) {
@@ -455,17 +457,8 @@ string do_call(Subline_State* s, Token* fn_name, bag<AST_Node*>* args) {
         auto text_col = string_to_color(text);
         auto bg_col = string_to_color(bg);
 
-        string cap = cap_arg;
-        for (int i=0; i<CAPS; i++) {
-            auto candidate = CAP_MAP[i];
-            if (equal(&cap_arg, candidate.name)) {
-                cap = to_string(candidate.val);
-                break;
-            }
-        }
-
         text_apply(s, bg_col);
-        print(FSTR, FARG(cap));
+        print(FSTR, FARG(cap_arg));
         text_apply(s, text_col);
         bg_apply(s, bg_col);
 
@@ -480,19 +473,10 @@ string do_call(Subline_State* s, Token* fn_name, bag<AST_Node*>* args) {
         auto text_col = string_to_color(text);
         auto bg_col = string_to_color(bg);
 
-        string arrow = arrow_arg;
-        for (int i=0; i<CAPS; i++) {
-            auto candidate = CAP_MAP[i];
-            if (equal(&arrow_arg, candidate.name)) {
-                arrow = to_string(candidate.val);
-                break;
-            }
-        }
-
         text_apply(s, s->style.bg);
         bg_apply(s, bg_col);
 
-        print(FSTR, FARG(arrow));
+        print(FSTR, FARG(arrow_arg));
 
         text_apply(s, text_col);
         bg_apply(s, bg_col);
@@ -708,6 +692,107 @@ void display(string str) {
     printf("%.*s", str.len, str.text);
 }
 
+#include <bitset>
+#include <iostream>
+void print_binary(s64 num) {
+    std::bitset<64> x(num);
+    std::cout << x << '\n';
+}
+
+string replace_escapes(Token* tok) {
+    auto str = unquote(token_text(tok));
+    char* new_text = (char*)malloc(str.len);
+    int ni = 0;
+    for (int i=0; i<str.len; i++, ni++) {
+        if (str.text[i] != '\\') {
+            new_text[ni] = str.text[i];
+            continue;
+        }
+        switch (str.text[i+1]) {
+            case 'a': new_text[ni] = '\a'; i++; break;
+            case 'b': new_text[ni] = '\b'; i++; break;
+            case 'e': new_text[ni] = '\e'; i++; break;
+            case 'f': new_text[ni] = '\f'; i++; break;
+            case 'n': new_text[ni] = '\n'; i++; break;
+            case 'r': new_text[ni] = '\r'; i++; break;
+            case 't': new_text[ni] = '\t'; i++; break;
+            case 'v': new_text[ni] = '\v'; i++; break;
+            case '\\': new_text[ni] = '\\'; i++; break;
+            case '\'': new_text[ni] = '\''; i++; break;
+            case '\"': new_text[ni] = '"'; i++; break;
+            case '\?': new_text[ni] = '?'; i++; break;
+            case 'u': {
+                #define CHECK_HEX(OFFSET) \
+                if (!is_hex_char(str.text[i+OFFSET])) { \
+                    auto err = error_at(tok->source, (str.text+i) - tok->source->text); \
+                    warn(FSTR "Invalid escape sequence.", FARG(err)); \
+                    exit(1); \
+                }
+                CHECK_HEX(2);
+                CHECK_HEX(3);
+                CHECK_HEX(4);
+                CHECK_HEX(5);
+                auto val = strtol(str.text+i+2, 0, 16);
+
+                if (val <= 0x7f) {
+                    new_text[ni] = (char)val;
+                } else if (val <= 0x7ff) {
+                    new_text[ni++] = 0xC0 | (char)((val >> 6) & 0x1F);
+                    new_text[ni]   = 0x80 | (char)(val & 0x3f);
+                } else if (val <= 0xffff) {
+                    new_text[ni++] = 0xE0 | (char)((val >> 12) & 0x0F);
+                    new_text[ni++] = 0x80 | (char)((val >> 6) & 0x3F);
+                    new_text[ni]   = 0x80 | (char)(val & 0x3F);
+                }
+
+                i+=5;
+            } break;
+
+            case 'U': {
+                #define CHECK_HEX(OFFSET) \
+                if (!is_hex_char(str.text[i+OFFSET])) { \
+                    auto err = error_at(tok->source, (str.text+i) - tok->source->text); \
+                    warn(FSTR "Invalid escape sequence.", FARG(err)); \
+                    exit(1); \
+                }
+                CHECK_HEX(2);
+                CHECK_HEX(3);
+                CHECK_HEX(4);
+                CHECK_HEX(5);
+                CHECK_HEX(6);
+                CHECK_HEX(7);
+                CHECK_HEX(8);
+                CHECK_HEX(9);
+                auto val = strtol(str.text+i+2, 0, 16);
+
+                if (val <= 0x7f) {
+                    new_text[ni] = (char)val;
+                } else if (val <= 0x7ff) {
+                    new_text[ni++] = 0xC0 | (char)((val >> 6) & 0x1F);
+                    new_text[ni]   = 0x80 | (char)((val >> 0) & 0x3f);
+                } else if (val <= 0xffff) {
+                    new_text[ni++] = 0xE0 | (char)((val >> 12) & 0x0F);
+                    new_text[ni++] = 0x80 | (char)((val >>  6) & 0x3F);
+                    new_text[ni]   = 0x80 | (char)((val >>  0) & 0x3F);
+                } else if (val <= 0x10FFF) {
+                    new_text[ni++] = 0xF0 | (char)((val >> 18) & 0x07);
+                    new_text[ni++] = 0x80 | (char)((val >> 12) & 0x3F);
+                    new_text[ni++] = 0x80 | (char)((val >>  6) & 0x3F);
+                    new_text[ni]   = 0x80 | (char)((val >>  0) & 0x3F);
+                } else {
+                    new_text[ni++] = (char)0xEF;
+                    new_text[ni++] = (char)0xBF;
+                    new_text[ni]   = (char)0xBD;
+                }
+
+                i += 9;
+            } break;
+        }
+    }
+
+    return string{new_text, ni};
+}
+
 string eval(AST_Node* node) {
     switch (node->kind) {
     case AT_IDENT: {
@@ -717,8 +802,7 @@ string eval(AST_Node* node) {
 
     case AT_STRING: {
         auto val = to_value(node);
-        auto text = token_text(&val->token);
-        return unquote(text);
+        return unquote(replace_escapes(&val->token));
     } break;
 
     case AT_COLOR:
@@ -789,6 +873,8 @@ string eval(AST_Node* node) {
 }
 
 int main() {
+    string subline = read_stdin();
+
     REQUIRED(state.cwd, cwd_str());
     // string frag = path_frag(copy(&cwd), -1, 0);
     // auto venv = env_var("VIRTUAL_ENV");
@@ -807,7 +893,8 @@ int main() {
         }
     }
 
-    auto st = Subline_Tokenizer(to_string(R"END(
+    auto st = Subline_Tokenizer(subline);
+    /*auto st = Subline_Tokenizer(to_string(R"END(
         _
         cap("P((", bg=#ff0000, text=#ffffff)
 
@@ -834,7 +921,7 @@ int main() {
         }
 
         arrow("P>>", text=default, bg=default)
-    )END"));
+    )END"));*/
 
     auto tokens = st.tokenize();
     auto sp = Subline_Parser::create(&tokens);
