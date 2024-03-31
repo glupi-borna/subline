@@ -6,6 +6,9 @@
 #include <initializer_list>
 #include <dirent.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <string.h>
 
 
 optional<string> cwd_str() {
@@ -44,23 +47,46 @@ bool dir_exists(char* path) {
     return false;
 }
 
-string read_stdin() {
-    int size = 2048;
-    auto offset = 0;
-    auto stdin_text = (char*)malloc(size);
-    auto ch = 0;
-    while (true) {
-        ch = fgetc(stdin);
-        if (ch == 0 || ch == -1) break;
-        stdin_text[offset] = ch;
-        offset++;
-        if (offset == size) {
-            size *= 2;
-            stdin_text = (char*)realloc(stdin_text, size);
+#define CHUNK_SIZE 1024
+
+string read_pipe(FILE* pipe) {
+    size_t buffer_size = CHUNK_SIZE;
+    char* pipe_text = (char*)malloc(buffer_size);
+
+    size_t total_size = 0;
+    ssize_t bytes_read;
+
+    while ((bytes_read = fread(pipe_text+total_size, 1, CHUNK_SIZE, pipe))) {
+        total_size += bytes_read;
+        if (total_size+CHUNK_SIZE > buffer_size) {
+            buffer_size += CHUNK_SIZE;
+            pipe_text = (char*)realloc(pipe_text, buffer_size);
         }
     }
-    stdin_text[offset] = 0;
-    return to_string(stdin_text);
+    assert(bytes_read != -1, "Failed to read pipe!");
+
+    pipe_text[total_size] = 0;
+    return to_string(pipe_text);
+}
+
+string read_pipe(int pipe) {
+    size_t buffer_size = CHUNK_SIZE;
+    char* pipe_text = (char*)malloc(buffer_size);
+
+    size_t total_size = 0;
+    ssize_t bytes_read;
+
+    while ((bytes_read = read(pipe, pipe_text+total_size, CHUNK_SIZE))) {
+        total_size += bytes_read;
+        if (total_size+CHUNK_SIZE > buffer_size) {
+            buffer_size += CHUNK_SIZE;
+            pipe_text = (char*)realloc(pipe_text, buffer_size);
+        }
+    }
+    assert(bytes_read != -1, "Failed to read pipe!");
+
+    pipe_text[total_size] = 0;
+    return to_string(pipe_text);
 }
 
 string read_file(FILE* file) {
@@ -104,6 +130,7 @@ optional<string> git_branch_name(string root) {
     charp_set(path, "/.git/HEAD", root.len);
     path[root.len + sizeof("/.git/HEAD") - 1] = 0;
 
+    // @TODO: str needs to be freed
     auto str = read_file(path);
     if (str.error) { return str; }
 
@@ -360,6 +387,12 @@ void assert_arg_count(Token* fn_name, bag<AST_Node*>* args, int count) {
     }
 }
 
+void assert_arg_count_min(Token* fn_name, bag<AST_Node*>* args, int count) {
+    if (args == 0 || args->len < count) {
+        FN_ERROR(fn_name, "expects at least %d %s", count, ARGUMENT_TXT(count));
+    }
+}
+
 string type_string(
     std::initializer_list<AT_TYPE> types
 ) {
@@ -446,10 +479,77 @@ string arg_type_named(
     return unquote(token_text(&to_value(arg)->token));
 }
 
+struct Command_Result {
+    string out;
+    string err;
+    int code;
+};
+
+Command_Result run_command(string* cmd_args, int len) {
+    int offset = 0;
+    int idx = 0;
+    char cmd_text[1024];
+    char* arr[len+1];
+
+    for (int i=0; i<len; i++) {
+        auto arg = cmd_args[i];
+        arr[idx] = cmd_text + offset;
+
+        for (int i=0; i<arg.len; i++) {
+            cmd_text[offset] = arg.text[i];
+            offset++;
+        }
+
+        cmd_text[offset] = 0;
+        offset++;
+        idx++;
+    }
+    arr[idx] = 0;
+
+    int pipe_stdout[2];
+    int pipe_stderr[2];
+    assert(pipe(pipe_stdout) == 0, "Failed to create output pipe!");
+    assert(pipe(pipe_stderr) == 0, "Failed to create error pipe!");
+
+    pid_t pid = fork();
+    assert(pid != -1, "Fork failed! %s", strerror(errno));
+
+    if (pid == 0) {
+        close(pipe_stdout[0]);
+        close(pipe_stderr[0]);
+
+        dup2(pipe_stdout[1], STDOUT_FILENO);
+        dup2(pipe_stderr[1], STDERR_FILENO);
+
+        close(pipe_stdout[1]);
+        close(pipe_stderr[1]);
+
+        execvp(arr[0], arr);
+        assert(false, "Failed to run %s: %s", arr[0], strerror(errno));
+    }
+
+    close(pipe_stdout[1]);
+    close(pipe_stderr[1]);
+
+    siginfo_t siginfo;
+    auto wait_res = waitid(P_PID, pid, &siginfo, WEXITED);
+    assert(wait_res >= 0, "waitid() failed: %s", strerror(errno));
+
+    auto out = read_pipe(pipe_stdout[0]);
+    auto err = read_pipe(pipe_stderr[0]);
+
+    return {
+        .out=out,
+        .err=err,
+        .code=WEXITSTATUS(siginfo.si_status),
+    };
+}
+
 string do_call(Subline_State* s, Token* fn_name, bag<AST_Node*>* args) {
     auto fn_name_str = token_text(fn_name);
 
     #define ARG_COUNT(count) assert_arg_count(fn_name, args, count)
+    #define ARG_COUNT_MIN(count) assert_arg_count_min(fn_name, args, count)
     #define ARG_TYPE(idx, ...) arg_type(fn_name, args, idx, {__VA_ARGS__})
     #define ARG_TYPE_RAW(idx, ...) arg_type_raw(fn_name, args, idx, {__VA_ARGS__})
     #define ARG_NAMED(name, ...) arg_type_named(fn_name, args, name, {__VA_ARGS__})
@@ -511,6 +611,15 @@ string do_call(Subline_State* s, Token* fn_name, bag<AST_Node*>* args) {
         if (envvar == 0) return {0};
         auto str = to_string(envvar);
         return copy(&str);
+
+    } else if (equal(&fn_name_str, "stdout")) {
+        ARG_COUNT_MIN(1);
+        string strs[args->len];
+        for (int i=0; i<args->len; i++) {
+            strs[i] = eval(args->items[i]);
+        }
+        auto res = run_command(strs, args->len);
+        return trim(&res.out);
 
     } else if (equal(&fn_name_str, "_")) {
         return to_string(" ");
@@ -720,7 +829,7 @@ void print_binary(s64 num) {
 
 string replace_escapes(Token* tok) {
     auto str = unquote(token_text(tok));
-    char* new_text = (char*)malloc(str.len);
+    char* new_text = (char*)malloc(str.len+1);
     int ni = 0;
     for (int i=0; i<str.len; i++, ni++) {
         if (str.text[i] != '\\') {
@@ -808,6 +917,7 @@ string replace_escapes(Token* tok) {
             } break;
         }
     }
+    new_text[ni] = 0;
 
     return string{new_text, ni};
 }
@@ -893,7 +1003,7 @@ string eval(AST_Node* node) {
 
 int main() {
     state.style = default_style();
-    string subline = read_stdin();
+    string subline = read_pipe(stdin);
 
     REQUIRED(state.cwd, cwd_str());
     // string frag = path_frag(copy(&cwd), -1, 0);
@@ -905,6 +1015,7 @@ int main() {
     state.git.error = git_dir.error;
     if (git_dir.error == 0) {
         state.git.value.dir = git_dir.value;
+        // @TODO: This copy() needs to be freed
         auto branch = git_branch_name(copy(&git_dir.value));
         if (branch.error) {
             state.git.value.branch = {0};

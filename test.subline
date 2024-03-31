@@ -8,6 +8,9 @@ if in-git-repo {
 
 if in-git-repo [bg(yellow) text(black)] {
     _ git-branch _ bold git-dir _
+    stdout("echo", "hello")
+    stdout("echo", "hello")
+    stdout("echo", "hello")
 } else [bg(blue) text(white)] {
     _ bold dir _
 }
