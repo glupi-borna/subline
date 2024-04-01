@@ -36,7 +36,7 @@ Just run `bash build.sh`.
 
 ## Using
 
-Currently, only subline only reads from standard input, so something like this should work:
+Currently, subline only reads from standard input, so something like this should work:
 
 ```bash
 ./subline </path/to/my/subline/script.subline
@@ -123,7 +123,7 @@ git-branch
 
 Function calls trigger special, built-in behavior. If a function requires no arguments, the parentheses may be left out.
 
-If a function has a named argument, that argument *must always* be provided by name (it can not be provided positionally). 
+If a function has a named argument, that argument *must always* be provided by name (it can not be provided positionally).
 
 Named arguments can be provided in any order.
 
@@ -148,7 +148,7 @@ Like `text(...)`, but changes the background color.
 env(USER)
 env("USER")
 ```
-Long form of `$USER`, used to fetch values of environment variables. The provided `varname` must either be a string or a bare identifier. 
+Long form of `$USER`, used to fetch values of environment variables. The provided `varname` must either be a string or a bare identifier.
 
 #### stdout(cmd, ...args)
 ```
@@ -223,7 +223,7 @@ Returns the path to the root of the current git directory. Works only inside of 
 ```
 git-dir
 ```
-Returns the current working directory relative to `git-root`. 
+Returns the current working directory relative to `git-root`.
 
 #### cap(cap_text, $text, $bg)
 ```
@@ -237,9 +237,9 @@ Used to draw the start of powerline-like prompt strings.
 
 #### arrow(arrow_text, $text, $bg)
 ```
-cap("\ue0b2", bg=yellow, text=black) 
-" 123 " 
-arrow("\ue0b0", bg=red, text=white) 
+cap("\ue0b2", bg=yellow, text=black)
+" 123 "
+arrow("\ue0b0", bg=red, text=white)
 " abc "
 ```
 ![Cap example](./assets/arrow.png)
@@ -273,7 +273,7 @@ These functions are used to turn text display properties on and off.
 "This text is normal"
 ```
 
-Blocks are used to group commands. 
+Blocks are used to group commands.
 
 Blocks will also restore the previous text display properties and colors when they are exitted.
 
@@ -288,7 +288,7 @@ if in-git-repo {
     dir
 }
 ```
-Unsurprisingly, conditionals will evaluate a block depending on the result of the condition. 
+Unsurprisingly, conditionals will evaluate a block depending on the result of the condition.
 
 The blocks may also use square braces to specify styling:
 
